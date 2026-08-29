@@ -152,6 +152,18 @@ def build_description(item):
     return "".join(parts)
 
 
+def build_combined_description(items):
+    """Build a single HTML description containing all games with images."""
+    parts = []
+    for item in items:
+        parts.append(f'<h3>{escape(item["title"])}</h3>')
+        if item.get("image"):
+            parts.append(f'<img src="{escape(item["image"])}" alt="{escape(item["title"])}" style="max-width:300px;" /><br/>')
+        parts.append(build_description(item))
+        parts.append("<hr/>")
+    return "".join(parts)
+
+
 def gen_rss(month_name, items):
     rss = ET.Element("rss", version="2.0", attrib={"xmlns:atom": "http://www.w3.org/2005/Atom"})
     channel = ET.SubElement(rss, "channel")
@@ -167,15 +179,14 @@ def gen_rss(month_name, items):
     atom_link.set("type", "application/rss+xml")
 
     pub_day = month_first_day(month_name)
-    for item in items:
-        entry = ET.SubElement(channel, "item")
-        ET.SubElement(entry, "title").text = item["title"]
-        ET.SubElement(entry, "link").text = URL
-        guid = f"humble-choice:{item['machine_name']}"
-        ET.SubElement(entry, "guid", isPermaLink="false").text = guid
-        ET.SubElement(entry, "description").text = build_description(item)
-        if pub_day is not None:
-            ET.SubElement(entry, "pubDate").text = format_datetime(pub_day, usegmt=True)
+    entry = ET.SubElement(channel, "item")
+    ET.SubElement(entry, "title").text = month_name
+    ET.SubElement(entry, "link").text = URL
+    guid = f"humble-choice:{datetime.now().strftime('%Y-%m')}"
+    ET.SubElement(entry, "guid", isPermaLink="false").text = guid
+    ET.SubElement(entry, "description").text = build_combined_description(items)
+    if pub_day is not None:
+        ET.SubElement(entry, "pubDate").text = format_datetime(pub_day, usegmt=True)
 
     ET.indent(rss, space="  ")
     return ET.tostring(rss, encoding="unicode", xml_declaration=True)
