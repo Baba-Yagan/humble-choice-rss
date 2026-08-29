@@ -1,0 +1,49 @@
+name: Weekly Humble Choice RSS Update
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-rss:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Run update script
+      run: python3 hbchoice2rss.py
+
+    - name: Commit and push RSS update
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+
+        TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+
+        rm -f humblechoice.html
+        git add humblechoice.rss
+
+        if git diff --staged --quiet; then
+          echo "No changes to RSS feed"
+        else
+          git commit -m "Humble Choice RSS update: $TIMESTAMP"
+          git push origin main
+
+          echo "RSS feed updated and pushed to main branch"
+          echo "RSS feed available at: https://raw.githubusercontent.com/${{ github.repository }}/main/humblechoice.rss"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
