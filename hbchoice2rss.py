@@ -27,13 +27,17 @@ RSS_PATH = "humblechoice.rss"
 HTML_PATH = "humblechoice.html"
 
 HEADERS = {"User-Agent": "hbchoice2rss/1.0"}
+# Ask Next.js for the raw flight (RSC) payload: same page, plain JSON instead of HTML.
+RSC_HEADERS = {"User-Agent": "hbchoice2rss/1.0", "RSC": "1"}
 
 # Delivery methods that indicate a real game (vs. e.g. the IGN Plus coupon).
-_GAME_DELIVERY_METHODS = {"steam", "epic", "gog", "origin", "uplay", "battle-net"}
+_GAME_DELIVERY_METHODS = {
+    "steam", "epic", "gog", "origin", "uplay", "battle-net", "blizzard",
+}
 
-_DATA_ATTR_RE = re.compile(r'data-content-choice-data="([^"]*)"')
-_ORDER_ATTR_RE = re.compile(r'data-display-order="([^"]*)"')
-_TITLE_RE = re.compile(r'<meta content="([^"]*)" property="og:title"\s*/?>')
+_MONTH_RE = re.compile(r"Get (\w+) (\d{4}) Humble Choice")
+
+_JSON_DECODER = json.JSONDecoder()
 
 _MONTH_MAP = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -43,59 +47,92 @@ _MONTH_MAP = {
 
 
 def fetch_html(url):
-    req = urllib.request.Request(url, headers=HEADERS)
+    """Fetch the membership page as a Next.js flight (RSC) payload.
+
+    The page is now client-rendered, but requesting it with `RSC: 1` returns
+    the serialized page data (plain JSON-ish stream) that includes the lineup.
+    """
+    req = urllib.request.Request(url, headers=RSC_HEADERS)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8")
 
 
-def parse_lineup(page):
-    """Return (month_name, items) from the membership page HTML."""
-    order_match = _ORDER_ATTR_RE.search(page)
-    data_match = _DATA_ATTR_RE.search(page)
-    title_match = _TITLE_RE.search(page)
+def _resolve_description(page, ref):
+    """Resolve a Next.js flight text reference like '$70' to its HTML text.
 
-    if not order_match or not data_match:
+    In the flight stream the chunk looks like: `70:T111d,<html text>`, where
+    111d is the text length in hex.
+    """
+    if not isinstance(ref, str) or not ref.startswith("$"):
+        return None
+    chunk_id = ref[1:]
+    m = re.search(r"\b%s:T([0-9a-fA-F]+)," % re.escape(chunk_id), page)
+    if not m:
+        return None
+    return page[m.end() : m.end() + int(m.group(1), 16)]
+
+
+def parse_lineup(page):
+    """Return (month_name, items) from the Next.js flight payload."""
+    marker = page.find('"subscriptionProducts":[')
+    if marker == -1:
         raise RuntimeError(
             "Could not find the Choice lineup in the page. "
             "Humble Bundle may have changed their markup."
         )
 
-    order = json.loads(html.unescape(order_match.group(1)))
-    raw = json.loads(html.unescape(data_match.group(1)))
+    products, _ = _JSON_DECODER.raw_decode(
+        page, marker + len('"subscriptionProducts":')
+    )
 
     items = []
-    for machine_name in order:
-        entry = raw.get(machine_name) or {}
-        delivery = entry.get("delivery_methods") or []
+    for entry in products:
+        if entry.get("productType") != "humble-choice":
+            continue
+        delivery = entry.get("deliveryMethods") or []
+        delivery = [d for d in delivery if isinstance(d, str)]
         is_game = any(m in _GAME_DELIVERY_METHODS for m in delivery)
 
-        copy = (entry.get("recommendation_copy_dict") or {}).get("copy")
+        platforms = entry.get("platforms")
+        if not isinstance(platforms, list):
+            platforms = []
+
+        price = (entry.get("displayPrice") or {}).get("currentPrice") or {}
+        msrp = None
+        if price.get("centAmount") is not None:
+            msrp = {
+                "currency": price.get("currencyCode", ""),
+                "amount": (price["centAmount"] or 0) / 100.0,
+            }
+
         description = None
-        if copy:
-            text = re.sub(r"<br\s*/?>", "\n", copy, flags=re.IGNORECASE)
+        raw_desc = _resolve_description(page, entry.get("description"))
+        if raw_desc:
+            text = re.sub(r"<br\s*/?>", "\n", raw_desc, flags=re.IGNORECASE)
             text = re.sub(r"<[^>]+>", "", text)
             text = re.sub(r"[ \t]+", " ", text).strip()
             description = text
 
         items.append(
             {
-                "machine_name": machine_name,
-                "title": entry.get("title") or machine_name,
+                "machine_name": entry.get("id") or "",
+                "title": entry.get("title") or entry.get("id") or "",
                 "is_game": is_game,
-                "genres": entry.get("genres") or [],
-                "platforms": entry.get("platforms") or [],
+                "genres": [],
+                "platforms": platforms,
                 "delivery_methods": delivery,
-                "msrp": entry.get("msrp"),
-                "user_rating": entry.get("user_rating"),
-                "image": entry.get("image"),
-                "youtube_links": entry.get("youtube_links") or [],
+                "msrp": msrp,
+                "user_rating": None,
+                "image": entry.get("thumbnail"),
+                "youtube_links": [],
                 "description": description,
             }
         )
 
     month_name = "Humble Choice"
-    if title_match:
-        month_name = html.unescape(title_match.group(1))
+    m = _MONTH_RE.search(page)
+    if m:
+        month_name = f"{m.group(1)} {m.group(2)} Humble Choice"
     return month_name, items
 
 
@@ -203,7 +240,8 @@ def main():
         try:
             with open(HTML_PATH, "r", encoding="utf-8") as f:
                 page = f.read()
-        except FileNotFoundError:
+            parse_lineup(page)  # validate cache; stale/old markup refetches below
+        except (FileNotFoundError, RuntimeError, json.JSONDecodeError):
             page = fetch_html(URL)
             with open(HTML_PATH, "w", encoding="utf-8") as f:
                 f.write(page)
